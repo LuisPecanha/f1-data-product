@@ -1,0 +1,321 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# F1 Data Product — Race Sessions
+# Open Data Contract Standard (ODCS) v1.1.0
+# ──────────────────────────────────────────────────────────────────────────────
+
+dataContractSpecification: "1.1.0"
+
+id: "7f3a2e1c-4b89-4d2f-9c7e-0a1b5f8d3e6a"
+
+# ── Info ──────────────────────────────────────────────────────────────────────
+info:
+  title: "Race Sessions"
+  version: "1.0.0"
+  owner: "f1-data-team"
+  description: >
+    Canonical gold-layer representation of every Formula 1 race weekend session
+    sourced from the OpenF1 REST API (https://openf1.org). Each row describes a
+    single session (Practice 1/2/3, Qualifying, Sprint, Sprint Shootout, or Race)
+    including its timing, circuit, and country metadata. Coverage begins with the
+    2023 season — the first season for which the OpenF1 API provides complete
+    historical data. This product is the authoritative source for session
+    filtering and time-window joins used by all downstream F1 analytics models.
+
+# ── Servers ───────────────────────────────────────────────────────────────────
+servers:
+  local:
+    type: duckdb
+    path: ./f1.duckdb
+    # DuckDB uses the concept of a schema within an in-process database file.
+    # The gold schema is the output-port layer written by the transformation
+    # pipeline; consumers should connect directly to this schema.
+    schema: gold
+    database: gold
+
+# ── Models ────────────────────────────────────────────────────────────────────
+models:
+  sessions:
+    type: table
+    description: >
+      One row per F1 race-weekend session. Session granularity is defined by
+      OpenF1's session_key, which is globally unique across all seasons and
+      circuits. Rows are append-only once a session has concluded; date_end may
+      be null for an in-progress or cancelled session.
+    fields:
+
+      session_key:
+        type: integer
+        description: >
+          Globally unique integer identifier for a session, assigned by OpenF1.
+          This is the natural primary key of the model and the recommended join
+          key for all downstream fact tables (lap times, telemetry, pit stops).
+        required: true
+        primaryKey: true
+
+      session_name:
+        type: string
+        description: >
+          Human-readable session label as returned verbatim by the OpenF1 API.
+          Representative values include: "Race", "Qualifying", "Practice 1",
+          "Practice 2", "Practice 3", "Sprint", "Sprint Shootout". Note that
+          the set of possible values may expand if the FIA introduces new
+          session formats; consumers should not hardcode against this field —
+          use session_type instead for categorical filtering.
+        required: true
+
+      session_type:
+        type: string
+        description: >
+          Normalised, coarser session category derived from session_name during
+          ingestion. Collapsed to one of four canonical values so that downstream
+          models can filter reliably without parsing free-text labels. "Sprint"
+          covers both Sprint races and Sprint Shootout qualifying sessions.
+        required: true
+        enum:
+          - Practice
+          - Qualifying
+          - Race
+          - Sprint
+
+      date_start:
+        type: timestamp
+        description: >
+          UTC timestamp at which the session officially began, as reported by
+          OpenF1. Stored in ISO-8601 format (YYYY-MM-DDTHH:MM:SS±HH:MM).
+          This field is used as the primary time anchor for all session-scoped
+          event joins.
+        required: true
+
+      date_end:
+        type: timestamp
+        description: >
+          UTC timestamp at which the session officially ended, as reported by
+          OpenF1. May be null for sessions that were cancelled, red-flagged
+          without a restart, or whose end time was not captured by the API.
+          Consumers must handle nulls before computing session durations.
+        required: false
+
+      year:
+        type: integer
+        description: >
+          Four-digit calendar year in which the session took place (e.g. 2024).
+          Derived from date_start during ingestion and materialised as a
+          convenience partition column to avoid full-table scans on single-season
+          queries.
+        required: true
+
+      circuit_short_name:
+        type: string
+        description: >
+          Abbreviated circuit identifier as returned by OpenF1 (e.g. "Monza",
+          "Silverstone", "Suzuka"). Not a stable enum — new values are introduced
+          whenever a new venue joins the FIA calendar. Suitable for display and
+          grouping but not for joins to a circuits dimension; use a circuit lookup
+          table keyed on this value if referential integrity is required.
+        required: true
+
+      country_name:
+        type: string
+        description: >
+          Full English name of the host country as returned by OpenF1
+          (e.g. "Italy", "United Kingdom", "Japan"). Not a formal ISO-3166 code;
+          consumers requiring a normalised country key should join to a reference
+          table. Values have been stable across 2023–2024 but may diverge for
+          circuits in countries that appear infrequently on the calendar.
+        required: true
+
+      location:
+        type: string
+        description: >
+          City or locality name associated with the circuit, as returned by
+          OpenF1 (e.g. "Monza", "Spa-Francorchamps", "Lusail"). In practice
+          this often duplicates circuit_short_name but may differ for circuits
+          that share a city with multiple venues, or where the FIA lists the
+          nearest major city rather than the circuit name.
+        required: true
+
+# ── Quality ───────────────────────────────────────────────────────────────────
+quality:
+  # Engine hint: these checks are expressed as declarative rules and are
+  # intended to be executed via dbt tests, Soda Core, or an equivalent
+  # framework targeting the local DuckDB gold.sessions table.
+  checks:
+
+    - name: session_key_not_null
+      description: >
+        session_key is the primary key of this model. A null value would make
+        the row unidentifiable and prevent any downstream join; rows missing
+        a session_key must be rejected at ingestion time.
+      type: not_null
+      column: session_key
+
+    - name: session_key_unique
+      description: >
+        Each session_key must appear exactly once in the sessions table. The
+        OpenF1 API guarantees uniqueness at source; a duplicate here indicates
+        a pipeline idempotency failure (e.g. a double-load) and must be
+        investigated before the model is promoted.
+      type: unique
+      column: session_key
+
+    - name: session_type_accepted_values
+      description: >
+        session_type must belong to the normalised enum defined in this
+        contract. Any value outside this set means the ingestion mapping logic
+        encountered a new session_name from OpenF1 that was not accounted for;
+        the pipeline should surface this as a warning and default to a
+        quarantine value rather than silently dropping the row.
+      type: accepted_values
+      column: session_type
+      values:
+        - Practice
+        - Qualifying
+        - Race
+        - Sprint
+
+    - name: date_start_not_null
+      description: >
+        Every session in the gold layer must have a recorded start timestamp.
+        OpenF1 provides date_start for all completed sessions; a null here
+        indicates either an incomplete upstream record or a parsing failure
+        and must be treated as a data quality incident.
+      type: not_null
+      column: date_start
+
+    - name: year_in_range
+      description: >
+        The year column must fall within the supported data range of this
+        product: 2023 (the earliest complete season in OpenF1) through the
+        current calendar year (2026 at contract authorship). Records outside
+        this window suggest either a misparse of date_start or the arrival of
+        pre-2023 historical data, which is not yet in scope.
+      type: range
+      column: year
+      min: 2023
+      max: 2026  # update this bound when the contract is renewed annually
+
+# ── Upstream Stability (custom extension) ────────────────────────────────────
+#
+# This section is a project-level extension and is not part of the ODCS 1.1.0
+# core specification. It documents the stability assumptions made about the
+# upstream OpenF1 API schema so that future maintainers understand which fields
+# carry risk and what governance action is required if the API changes.
+#
+upstreamStability:
+  source: "OpenF1 REST API"
+  sourceUrl: "https://openf1.org/#sessions"
+  assumption: >
+    The OpenF1 API schema is considered stable for all fields listed in this
+    contract as of the 2023 and 2024 seasons. The team has observed no breaking
+    field-level changes across those two seasons. Stability is assessed on a
+    per-field basis below.
+  breakingChangePolicy: >
+    Any breaking change in the OpenF1 API response schema that affects a field
+    listed in the models section of this contract MUST trigger a contract version
+    bump (following SemVer: major bump for removed/renamed/retyped fields, minor
+    bump for new optional fields that alter recommended usage). The ingestion
+    pipeline must be updated in the same PR as the contract bump; no gold-layer
+    promotion is permitted while the contract and pipeline are out of sync.
+  additivChangePolicy: >
+    New fields returned by OpenF1 that are not yet listed in this contract may
+    be silently ignored by the pipeline. They should be assessed for inclusion
+    in the next planned minor version of this contract.
+  fields:
+
+    session_key:
+      upstreamField: "session_key"
+      presentIn2023: true
+      presentIn2024: true
+      stability: stable
+      notes: >
+        Core identifier returned for every session since the API launched.
+        Integer type, non-null, globally unique. No variation observed across
+        2023–2024. Low risk.
+
+    session_name:
+      upstreamField: "session_name"
+      presentIn2023: true
+      presentIn2024: true
+      stability: stable-with-caveat
+      notes: >
+        Field is stable and consistently present, but the set of values is
+        effectively an open enum controlled by OpenF1/FIA. "Sprint Shootout"
+        was introduced mid-2023 as the Sprint format was revised. New labels
+        are possible if the FIA modifies the race weekend format again.
+        Downstream models should use session_type (the normalised field) rather
+        than session_name for categorical logic.
+
+    session_type:
+      upstreamField: "session_type"
+      presentIn2023: true
+      presentIn2024: true
+      stability: stable
+      notes: >
+        Top-level category field returned consistently by OpenF1. Values
+        observed: "Practice", "Qualifying", "Race", "Sprint". No renames or
+        additions detected across 2023–2024. Low risk.
+
+    date_start:
+      upstreamField: "date_start"
+      presentIn2023: true
+      presentIn2024: true
+      stability: stable
+      notes: >
+        UTC ISO-8601 timestamp. Present and non-null for all completed sessions
+        across both observed seasons. Format has not changed. Low risk.
+
+    date_end:
+      upstreamField: "date_end"
+      presentIn2023: true
+      presentIn2024: true
+      stability: stable-with-caveat
+      notes: >
+        Present in both seasons but may be null for cancelled or red-flagged
+        sessions where a definitive end time was never recorded. The nullable
+        contract on this field reflects observed API behaviour and should not
+        be tightened without confirming full population in the API.
+
+    year:
+      upstreamField: "year"
+      presentIn2023: true
+      presentIn2024: true
+      stability: stable
+      notes: >
+        Integer field returned directly by OpenF1. Consistent with the
+        calendar year of date_start across all observed sessions. Used as a
+        partition convenience column; if the API were to remove it, it could
+        be derived from date_start with no quality loss.
+
+    circuit_short_name:
+      upstreamField: "circuit_short_name"
+      presentIn2023: true
+      presentIn2024: true
+      stability: stable-with-caveat
+      notes: >
+        Present and consistently named across 2023–2024. Values are controlled
+        by OpenF1's internal enumeration; new values will appear each time a
+        new venue joins the calendar (e.g. a Las Vegas GP entry appeared in
+        2023). Existing values have not been observed to be renamed. Medium risk
+        due to calendar expansion.
+
+    country_name:
+      upstreamField: "country_name"
+      presentIn2023: true
+      presentIn2024: true
+      stability: stable
+      notes: >
+        Human-readable country name returned as a plain string. No formal
+        ISO standard enforced by OpenF1. Values have been consistent for
+        recurring circuits; new countries will appear as the calendar evolves.
+        Low risk for existing rows.
+
+    location:
+      upstreamField: "location"
+      presentIn2023: true
+      presentIn2024: true
+      stability: stable
+      notes: >
+        City or locality field. Present across all observed sessions. In some
+        cases mirrors circuit_short_name; in others refers to the nearest city.
+        No renaming or removal observed. New values introduced with new circuits.
+        Low risk for existing rows.
