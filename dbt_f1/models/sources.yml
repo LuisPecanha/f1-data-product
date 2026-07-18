@@ -1,0 +1,43 @@
+version: 2
+
+sources:
+  - name: openf1_raw
+    schema: bronze
+    description: >
+      Raw OpenF1 API data loaded into the bronze schema by dlt, one table per
+      source endpoint. No transformation is applied to these tables.
+    loaded_at_field: _dlt_load_id
+    tables:
+      - name: sessions
+        description: >
+          Raw session records loaded from the OpenF1 `/v1/sessions` endpoint.
+          One row per race-weekend session (Practice, Qualifying, Sprint, Race).
+
+      - name: laps
+        description: >
+          Raw lap timing records loaded from the OpenF1 `/v1/laps` endpoint.
+          One row per driver per lap per session.
+
+      - name: pit
+        description: >
+          Raw pit stop records loaded from the OpenF1 `/v1/pit` endpoint.
+          One row per pit stop, keyed by session, driver, and the lap on
+          which the car entered the pits.
+
+      - name: stints
+        description: >
+          Raw tyre stint records loaded from the OpenF1 `/v1/stints` endpoint.
+          One row per stint per driver per session, covering a contiguous
+          range of laps on a single tyre compound.
+
+      - name: drivers
+        description: >
+          Raw driver and team records loaded from the OpenF1 `/v1/drivers`
+          endpoint. One row per driver per session, used to resolve driver
+          name and team name.
+
+      - name: race_control
+        description: >
+          Raw race control event records loaded from the OpenF1
+          `/v1/race_control` endpoint, including Safety Car and Virtual
+          Safety Car periods.
