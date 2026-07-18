@@ -1,0 +1,635 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# F1 Data Product — Driver Season Stats
+# Open Data Contract Standard (ODCS) v1.1.0
+# Primary gold output port of the F1 data product.
+# ──────────────────────────────────────────────────────────────────────────────
+
+dataContractSpecification: "1.1.0"
+
+id: "c9e3d7f2-8a15-4b6e-a3f1-2d0c9b4e7a8f"
+
+# ── Info ──────────────────────────────────────────────────────────────────────
+info:
+  title: "Driver Season Stats"
+  version: "1.0.0"
+  owner: "f1-data-team"
+  description: >
+    Season-level aggregation per driver, derived entirely from the sessions and
+    lap_times gold models. Each row represents a single driver's performance
+    summary for a single Formula 1 season. This is the primary gold output port
+    of the F1 data product — the table most downstream consumers (dashboards,
+    reports, season comparisons) will query directly. Metrics cover race
+    performance (lap times, fastest laps), tyre strategy (compound lap counts),
+    pit stop efficiency, and safety car exposure. Unless a field description
+    explicitly states otherwise, all aggregations are scoped to sessions where
+    session_type = 'Race'. Driver identity and team attribution are resolved
+    from the OpenF1 /v1/drivers endpoint using the most recent entry per driver
+    per season to handle mid-season constructor changes.
+
+# ── Servers ───────────────────────────────────────────────────────────────────
+servers:
+  local:
+    type: duckdb
+    path: ./f1.duckdb
+    schema: gold
+    database: gold
+
+# ── Input Ports ───────────────────────────────────────────────────────────────
+# Both upstream gold contracts must be fully loaded and validated before this
+# model is built. The aggregation grain is (driver_number, year), joined across
+# both upstream models via session_key and filtered to session_type = 'Race'
+# for race-scoped metrics.
+inputPorts:
+  sessions:
+    contractId: "7f3a2e1c-4b89-4d2f-9c7e-0a1b5f8d3e6a"
+    contractTitle: "Race Sessions"
+    table: gold.sessions
+    description: >
+      Provides session-level metadata used to (a) filter lap_times to
+      session_type = 'Race' for race-scoped metrics, and (b) resolve the year
+      of each session for the season grouping. The join key between sessions
+      and lap_times is session_key. The year dimension for the output grain
+      is sourced from sessions.year.
+    joinKey: session_key
+    joinKeyType: integer
+    aggregationGrain:
+      - driver_number
+      - year
+
+  lap_times:
+    contractId: "a2f8b3d1-6e74-4c9a-b5d2-1f0e7a3c8b4d"
+    contractTitle: "Lap Times"
+    table: gold.lap_times
+    description: >
+      Provides the lap-level fact rows that are aggregated to produce all
+      numeric metrics in this model — lap durations, pit stop data, tyre
+      compounds, and safety car flags. Joined to gold.sessions on session_key
+      to obtain session_type and year. Aggregation then groups by
+      (driver_number, year) to produce one output row per driver per season.
+    joinKey: session_key
+    joinKeyType: integer
+    aggregationGrain:
+      - driver_number
+      - year
+
+# ── Models ────────────────────────────────────────────────────────────────────
+models:
+  driver_season_stats:
+    type: table
+    description: >
+      One row per driver per season. The composite primary key is
+      (driver_number, year). All race-scoped fields aggregate only laps where
+      the parent session has session_type = 'Race'. Laps with null lap_duration
+      are excluded from all average and minimum (fastest lap) calculations.
+      Driver name and team name are resolved from the OpenF1 /v1/drivers
+      endpoint rather than from lap-level data.
+    fields:
+
+      driver_number:
+        type: integer
+        description: >
+          The race number assigned to the driver for the season (e.g. 1 for
+          Verstappen, 44 for Hamilton). Part of the composite primary key.
+          Driver numbers are season-scoped — the same number can be reassigned
+          between seasons — so driver_number alone does not uniquely identify
+          a driver across multiple years. The (driver_number, year) combination
+          is the stable cross-season identifier for this model.
+        required: true
+        primaryKey: true
+
+      year:
+        type: integer
+        description: >
+          The four-digit calendar year of the season (e.g. 2024). Sourced from
+          gold.sessions.year via the session_key join. Part of the composite
+          primary key. Must fall within the supported data range (2023 to
+          current year). Each row in this model represents exactly one driver's
+          statistics for exactly one season.
+        required: true
+        primaryKey: true
+
+      driver_name:
+        type: string
+        description: >
+          The driver's full name as returned by the OpenF1 /v1/drivers endpoint
+          (e.g. "Max VERSTAPPEN", "Lewis HAMILTON"). Resolved using the most
+          recent /v1/drivers record for this driver_number within the season, to
+          ensure consistency when a driver's display name is updated mid-season.
+          See upstreamStability for the known instability risk around name
+          formatting across seasons.
+        required: true
+
+      team_name:
+        type: string
+        description: >
+          The constructor name for the driver in this season, as returned by the
+          OpenF1 /v1/drivers endpoint (e.g. "Red Bull Racing", "Mercedes").
+          Resolved using the most recent /v1/drivers record for this
+          driver_number within the season. For drivers who changed constructor
+          mid-season (a rare but possible FIA-permitted occurrence), the
+          team_name reflects the most recent team — not the team with the most
+          laps driven. See aggregationLogic and upstreamStability for the full
+          tie-breaking rule and its limitations.
+        required: true
+
+      total_laps:
+        type: integer
+        description: >
+          Total number of laps recorded for this driver across ALL session types
+          in the season (Practice, Qualifying, Sprint, and Race). Sourced from
+          gold.lap_times without session_type filtering. Intended as the
+          denominator for broad completeness checks and as the superset against
+          which total_race_laps is compared. A lap is counted regardless of
+          whether lap_duration is null (pit-out and aborted laps are included
+          in the count).
+        required: true
+
+      total_race_laps:
+        type: integer
+        description: >
+          Total number of laps recorded for this driver in sessions where
+          session_type = 'Race' only. Excludes Practice, Qualifying, and Sprint
+          sessions. Null lap_duration rows (pit-out, aborted laps) are still
+          counted — this is a lap count, not a lap duration sum. Must always be
+          less than or equal to total_laps. A value of 0 indicates the driver
+          did not start or complete any race laps in the season (e.g. DNS on
+          all race weekends).
+        required: true
+
+      avg_lap_duration_seconds:
+        type: number
+        description: >
+          Mean lap time in seconds across all valid laps in Race sessions for
+          this driver and season. "Valid" means lap_duration IS NOT NULL and
+          lap_duration > 0. Pit-out laps and aborted laps (where lap_duration
+          is null) are excluded. Null when the driver has no valid race laps
+          in the season (e.g. a driver who only participated in practice and
+          did not complete a full race lap). When not null, must be strictly
+          greater than 0.
+        required: false
+
+      fastest_lap_seconds:
+        type: number
+        description: >
+          The single fastest valid lap time in seconds across all Race sessions
+          for this driver and season. "Valid" means lap_duration IS NOT NULL
+          and lap_duration > 0. Equivalent to MIN(lap_duration) filtered to
+          Race sessions with non-null durations. Null under the same conditions
+          as avg_lap_duration_seconds. When not null, must be strictly greater
+          than 0 and will always be less than or equal to
+          avg_lap_duration_seconds.
+        required: false
+
+      total_pit_stops:
+        type: integer
+        description: >
+          Total number of pit stops made by the driver across all Race sessions
+          in the season. Counted as the number of lap_times rows in Race
+          sessions where pit_duration IS NOT NULL (i.e. the driver entered the
+          pits on that lap). Note that pit_duration data in gold.lap_times has
+          partial availability prior to the 2024 US Grand Prix; counts for the
+          2023 season and early 2024 may be understated. Required and non-null;
+          a value of 0 is valid for a driver with no pit stop records (not the
+          same as no pit stops having occurred — see upstreamStability).
+        required: true
+
+      avg_pit_duration_seconds:
+        type: number
+        description: >
+          Mean pit stop duration in seconds across all Race sessions for this
+          driver and season. Calculated as the mean of pit_duration values
+          from gold.lap_times where session_type = 'Race' and pit_duration IS
+          NOT NULL. Null when the driver has no non-null pit_duration records
+          in race sessions (which may reflect missing data rather than no pit
+          stops — see total_pit_stops caveat). When not null, must be strictly
+          greater than 0.
+        required: false
+
+      laps_under_safety_car:
+        type: integer
+        description: >
+          Count of laps in Race sessions where under_safety_car = true. Sourced
+          directly from gold.lap_times.under_safety_car, which is a derived
+          boolean field (see the lap_times contract for derivation logic).
+          Required and non-null; a value of 0 means no race laps for this
+          driver in this season were flagged as occurring under a Safety Car
+          period. Inherits the derivation uncertainty documented in the
+          lap_times contract.
+        required: true
+
+      laps_under_vsc:
+        type: integer
+        description: >
+          Count of laps in Race sessions where under_vsc = true. Sourced from
+          gold.lap_times.under_vsc. Same derivation inheritance as
+          laps_under_safety_car but for Virtual Safety Car periods. A single
+          lap can contribute to both laps_under_safety_car and laps_under_vsc
+          if a VSC transitioned to a full Safety Car within the same lap window
+          (see lap_times contract for details). Required and non-null.
+        required: true
+
+      soft_lap_count:
+        type: integer
+        description: >
+          Count of laps in Race sessions where compound = 'SOFT'. Sourced from
+          gold.lap_times.compound filtered to Race sessions. Laps where compound
+          = 'UNKNOWN' are excluded from this count (they are not allocated to
+          any compound bucket). Required and non-null; a value of 0 means the
+          driver ran no laps on the SOFT compound in any race session during
+          the season.
+        required: true
+
+      medium_lap_count:
+        type: integer
+        description: >
+          Count of laps in Race sessions where compound = 'MEDIUM'. Same
+          counting logic and UNKNOWN exclusion as soft_lap_count. Required
+          and non-null.
+        required: true
+
+      hard_lap_count:
+        type: integer
+        description: >
+          Count of laps in Race sessions where compound = 'HARD'. Same counting
+          logic and UNKNOWN exclusion as soft_lap_count. Required and non-null.
+        required: true
+
+# ── Quality ───────────────────────────────────────────────────────────────────
+quality:
+  # Engine hint: checks are intended to run via dbt tests, Soda Core, or
+  # equivalent against gold.driver_season_stats in DuckDB. SQL-type checks
+  # use a mustBe: 0 assertion — zero rows should violate the condition.
+  checks:
+
+    - name: composite_pk_unique
+      description: >
+        The combination (driver_number, year) must be globally unique across
+        the table. A duplicate means either the aggregation logic produced two
+        output rows for the same driver in the same season, or a double-load
+        occurred. Either must be resolved before this table is consumed.
+      type: unique_combination
+      columns:
+        - driver_number
+        - year
+
+    - name: driver_number_not_null
+      description: >
+        driver_number is a component of the composite primary key. A null value
+        makes the row impossible to attribute to a driver and breaks all
+        driver-scoped queries.
+      type: not_null
+      column: driver_number
+
+    - name: year_not_null
+      description: >
+        year is a component of the composite primary key and the season
+        partitioning dimension. A null value means the row cannot be assigned
+        to a season and would corrupt any year-over-year comparison.
+      type: not_null
+      column: year
+
+    - name: driver_name_not_null
+      description: >
+        driver_name must be resolvable for every driver in the output. A null
+        here means the /v1/drivers lookup failed to return a record for this
+        driver_number in this season — the pipeline must surface this as an
+        error rather than writing a null.
+      type: not_null
+      column: driver_name
+
+    - name: team_name_not_null
+      description: >
+        team_name must be resolvable for every driver in the output. A null
+        here means the /v1/drivers lookup returned no team entry for this
+        driver and season. Same pipeline error handling as driver_name.
+      type: not_null
+      column: team_name
+
+    - name: total_laps_non_negative
+      description: >
+        total_laps is a count and cannot be negative. A value of 0 is
+        theoretically possible (a driver registered for a season but with
+        no lap records in the source data) but should trigger a data quality
+        warning — it likely indicates an ingestion gap.
+      type: range
+      column: total_laps
+      min: 0
+
+    - name: total_race_laps_non_negative
+      description: >
+        total_race_laps is a count and cannot be negative. A value of 0 is
+        valid for a driver who participated in a season but did not complete
+        any race laps (e.g. DNS on all race weekends or data not yet available).
+      type: range
+      column: total_race_laps
+      min: 0
+
+    - name: total_race_laps_lte_total_laps
+      description: >
+        total_race_laps counts only Race-session laps; total_laps counts all
+        session types. Therefore total_race_laps can never exceed total_laps.
+        A violation means either the session-type filter in the aggregation
+        logic is broken, or the two counts are sourced from inconsistent
+        snapshots of the upstream data.
+      type: sql
+      query: >
+        SELECT COUNT(*)
+        FROM gold.driver_season_stats
+        WHERE total_race_laps > total_laps
+      mustBe: 0
+
+    - name: avg_lap_duration_positive_when_not_null
+      description: >
+        When avg_lap_duration_seconds is not null it must be strictly greater
+        than 0. A zero or negative average lap time indicates a unit conversion
+        error or aggregation over corrupt source data.
+      type: sql
+      query: >
+        SELECT COUNT(*)
+        FROM gold.driver_season_stats
+        WHERE avg_lap_duration_seconds IS NOT NULL
+          AND avg_lap_duration_seconds <= 0
+      mustBe: 0
+
+    - name: fastest_lap_positive_when_not_null
+      description: >
+        When fastest_lap_seconds is not null it must be strictly greater than
+        0. Same reasoning as avg_lap_duration_positive_when_not_null. Also
+        implies fastest_lap_seconds <= avg_lap_duration_seconds, though that
+        relationship is not enforced as a separate check here.
+      type: sql
+      query: >
+        SELECT COUNT(*)
+        FROM gold.driver_season_stats
+        WHERE fastest_lap_seconds IS NOT NULL
+          AND fastest_lap_seconds <= 0
+      mustBe: 0
+
+    - name: year_in_range
+      description: >
+        The year must fall within the supported data range of this product:
+        2023 (earliest complete season in OpenF1) through the current calendar
+        year (2026 at contract authorship). Rows outside this range indicate
+        either a misparse of session dates or the arrival of pre-2023
+        historical data, which is not in scope.
+      type: range
+      column: year
+      min: 2023
+      max: 2026  # update annually when the contract is renewed
+
+# ── Aggregation Logic (custom extension) ─────────────────────────────────────
+#
+# Project-level extension documenting the aggregation rules that govern how
+# rows in this model are computed from gold.sessions and gold.lap_times.
+# This section is the authoritative specification for the dbt model that
+# produces driver_season_stats; if the dbt logic and this section disagree,
+# the contract is correct and the dbt model must be fixed.
+#
+aggregationLogic:
+  defaultScope: >
+    Unless a field description explicitly states otherwise, ALL numeric
+    aggregations (counts, averages, min) in this model are scoped to rows in
+    gold.lap_times where the parent session has session_type = 'Race'. The
+    join path is: gold.lap_times JOIN gold.sessions ON session_key, then
+    WHERE gold.sessions.session_type = 'Race'. Fields whose scope differs
+    are: total_laps (all session types — no filter).
+
+  nullLapDurationHandling: >
+    Laps where lap_duration IS NULL are EXCLUDED from all average and fastest
+    lap calculations (avg_lap_duration_seconds, fastest_lap_seconds). They are
+    INCLUDED in lap count fields (total_laps, total_race_laps, laps_under_safety_car,
+    laps_under_vsc, soft_lap_count, medium_lap_count, hard_lap_count). This
+    means a driver's total_race_laps count may exceed the number of laps
+    contributing to their average lap time; consumers must account for this when
+    computing weighted metrics across drivers.
+
+  driverNameResolution:
+    source: "OpenF1 /v1/drivers"
+    method: >
+      For each (driver_number, year) pair in the output, query /v1/drivers
+      filtered to session_keys that belong to that season (joined via
+      gold.sessions.year). From all matching driver records, select the one
+      with the most recent session_key (i.e. the latest session in the season
+      for which a driver record exists). This "most recent" rule ensures that
+      if a driver's name representation changes mid-season in the OpenF1 data,
+      the final row reflects the latest known format.
+    fallback: >
+      If /v1/drivers returns no record for a given driver_number in a season,
+      the pipeline must raise a data quality error and NOT write null to
+      driver_name. The row should be held in a quarantine table pending
+      investigation.
+
+  teamNameResolution:
+    source: "OpenF1 /v1/drivers"
+    method: >
+      Resolved using the same most-recent-session rule as driver_name — the
+      team_name field in the output reflects the team_name from the latest
+      /v1/drivers record for this driver in this season.
+    midSeasonChangeTieBreak: >
+      For drivers who changed constructor mid-season (permitted by the FIA in
+      exceptional circumstances), the team_name in this model will reflect the
+      constructor for the LAST race of the season in which the driver
+      participated. This is a deliberate simplification: the model does not
+      split a driver's season stats by team. Consumers who need per-team
+      attribution for mid-season transfers must query gold.lap_times directly
+      and join to gold.sessions for team context at the session grain.
+    fallback: Same fallback policy as driverNameResolution.
+
+  compoundCountLogic: >
+    soft_lap_count, medium_lap_count, and hard_lap_count count laps where
+    compound equals the respective value, scoped to Race sessions. Laps where
+    compound = 'UNKNOWN' are NOT allocated to any compound bucket — they
+    represent data quality gaps and are excluded from all three counts. The
+    sum (soft_lap_count + medium_lap_count + hard_lap_count) will therefore
+    be less than or equal to total_race_laps; the gap equals the count of
+    INTERMEDIATE, WET, and UNKNOWN laps in race sessions, which is expected
+    to be a small minority in normal race conditions.
+
+  pitStopCountLogic: >
+    total_pit_stops is the count of lap_times rows in Race sessions where
+    pit_duration IS NOT NULL. This counts the number of laps on which a pit
+    stop was served, not the number of pit lane entries (which are the same
+    thing in standard racing — a driver can only stop once per pit entry).
+    avg_pit_duration_seconds is the mean of those non-null pit_duration values.
+    Both metrics inherit the data availability caveat from gold.lap_times:
+    pit_duration data has partial coverage before the 2024 US Grand Prix, so
+    2023 values will be understated.
+
+# ── Upstream Stability (custom extension) ────────────────────────────────────
+#
+# Project-level extension. This model has NO direct OpenF1 API dependencies
+# for its core aggregation logic — it is fully derived from gold.sessions and
+# gold.lap_times. Stability risk is therefore inherited from those two upstream
+# contracts. The only raw API call made during model construction is to
+# /v1/drivers for driver_name and team_name resolution; that dependency is
+# documented below. Breaking changes in either upstream contract must propagate
+# a review of this contract and potentially a version bump here.
+#
+upstreamStability:
+  directApiDependencies:
+    - endpoint: "OpenF1 /v1/drivers"
+      purpose: "Resolving driver_name and team_name only"
+      scope: >
+        This is the only raw API call in the driver_season_stats pipeline. All
+        other data flows through gold.sessions and gold.lap_times.
+  inheritedDependencies:
+    - contractId: "7f3a2e1c-4b89-4d2f-9c7e-0a1b5f8d3e6a"
+      contractTitle: "Race Sessions"
+      inheritsRiskFor:
+        - session_key (join key)
+        - year (grouping dimension)
+        - session_type (race-scope filter)
+    - contractId: "a2f8b3d1-6e74-4c9a-b5d2-1f0e7a3c8b4d"
+      contractTitle: "Lap Times"
+      inheritsRiskFor:
+        - all aggregated metrics
+        - compound (tyre counts)
+        - under_safety_car (laps_under_safety_car)
+        - under_vsc (laps_under_vsc)
+        - pit_duration (pit stop metrics)
+  assumption: >
+    Because this model is fully derived from upstream gold contracts, a breaking
+    change in either the sessions or lap_times contract will cascade to this
+    model even without any change to the OpenF1 API directly. The stability
+    ratings below reflect per-field risk at this model's level; the root cause
+    of instability in derived fields is documented in the upstream contracts.
+  breakingChangePolicy: >
+    A contract version bump for driver_season_stats is required when: (a) either
+    upstream contract (sessions or lap_times) has a major version bump that
+    changes a field this model depends on; (b) the /v1/drivers API changes the
+    format or availability of driver_name or team_name; or (c) the aggregation
+    scope rules in aggregationLogic change semantics (e.g. including Sprint
+    sessions in race-scoped metrics). Minor additions (new fields) warrant a
+    minor version bump.
+  additiveChangePolicy: >
+    New fields may be added to this model without requiring upstream contract
+    version bumps, provided they derive from already-contracted upstream fields.
+  fields:
+
+    driver_number:
+      derivedFrom: "gold.lap_times.driver_number"
+      stability: stable
+      notes: >
+        Grouping key passed through from gold.lap_times. Stability is inherited
+        from the lap_times contract where it is rated stable. Low risk.
+
+    year:
+      derivedFrom: "gold.sessions.year"
+      stability: stable
+      notes: >
+        Grouping key passed through from gold.sessions. Stability is inherited
+        from the sessions contract where it is rated stable. Low risk.
+
+    driver_name:
+      derivedFrom: "OpenF1 /v1/drivers.full_name"
+      stability: potentially-unstable
+      notes: >
+        ⚠ ELEVATED RISK. OpenF1 returns driver names via the full_name field
+        in /v1/drivers (e.g. "Max VERSTAPPEN" — last name in uppercase). This
+        format has been consistent within 2023 and 2024, but there is no
+        contractual guarantee from OpenF1 that the capitalisation convention,
+        the separator between first and last name, or the field name itself
+        will remain stable across seasons. Additionally, the OpenF1 docs show
+        a broadcast_name field (e.g. "M VERSTAPPEN") that differs from
+        full_name; the pipeline must explicitly select full_name and not
+        accidentally fall back to broadcast_name. If a driver's legal name
+        changes (marriage, court order), the update will appear in /v1/drivers
+        from the next session onward and the most-recent-session resolution
+        rule will automatically pick up the new name — but will introduce a
+        year-over-year inconsistency for that driver.
+
+    team_name:
+      derivedFrom: "OpenF1 /v1/drivers.team_name"
+      stability: potentially-unstable
+      notes: >
+        ⚠ ELEVATED RISK. Two distinct instability sources exist: (1) mid-season
+        constructor changes — if a driver moves teams during a season, this
+        model reflects the most-recent team only, which means the metric values
+        in the row (lap times, tyre strategy) aggregate across BOTH teams even
+        though the team_name label shows only the most recent one. Consumers
+        must be warned of this limitation. (2) Constructor name formatting —
+        OpenF1 returns team names as free-text strings controlled by the teams
+        themselves (e.g. "Red Bull Racing" vs "Oracle Red Bull Racing"). These
+        have been observed to change across seasons when sponsors join or leave
+        title partnerships. Year-over-year string matching on team_name is
+        therefore unreliable; use driver_number as the stable cross-season key.
+
+    total_laps:
+      derivedFrom: "COUNT(*) over gold.lap_times (all session types)"
+      stability: stable
+      notes: >
+        Simple count with no session-type filter. Inherits stability from
+        gold.lap_times.lap_number. Risk is low.
+
+    total_race_laps:
+      derivedFrom: "COUNT(*) over gold.lap_times WHERE session_type = 'Race'"
+      stability: stable
+      notes: >
+        Count filtered to Race sessions via gold.sessions.session_type join.
+        Stability of the filter depends on session_type values in the sessions
+        contract (rated stable there). Low risk.
+
+    avg_lap_duration_seconds:
+      derivedFrom: "AVG(gold.lap_times.lap_duration) WHERE session_type = 'Race' AND lap_duration IS NOT NULL"
+      stability: stable
+      notes: >
+        Derived from gold.lap_times.lap_duration (rated stable in the lap_times
+        contract). The null exclusion logic is a pipeline rule, not an API
+        dependency, so it carries no upstream API risk. Low risk.
+
+    fastest_lap_seconds:
+      derivedFrom: "MIN(gold.lap_times.lap_duration) WHERE session_type = 'Race' AND lap_duration IS NOT NULL"
+      stability: stable
+      notes: Same stability assessment as avg_lap_duration_seconds. Low risk.
+
+    total_pit_stops:
+      derivedFrom: "COUNT(*) over gold.lap_times WHERE session_type = 'Race' AND pit_duration IS NOT NULL"
+      stability: stable-with-caveat
+      notes: >
+        Depends on gold.lap_times.pit_duration, which the lap_times contract
+        rates as stable-with-caveat due to partial data availability before
+        the 2024 US Grand Prix. Counts for the 2023 season will be understated.
+        This caveat is carried forward here unchanged.
+
+    avg_pit_duration_seconds:
+      derivedFrom: "AVG(gold.lap_times.pit_duration) WHERE session_type = 'Race' AND pit_duration IS NOT NULL"
+      stability: stable-with-caveat
+      notes: Same caveat as total_pit_stops. Partial data before 2024 US GP.
+
+    laps_under_safety_car:
+      derivedFrom: "COUNT(*) over gold.lap_times WHERE session_type = 'Race' AND under_safety_car = true"
+      stability: potentially-unstable
+      notes: >
+        Inherits the potentially-unstable rating from gold.lap_times.under_safety_car,
+        which is a derived boolean dependent on /v1/race_control event
+        categorisation. If OpenF1 renames the 'SafetyCar' category string, all
+        values of this field would silently become 0 for affected seasons. See
+        the lap_times contract for the full risk assessment.
+
+    laps_under_vsc:
+      derivedFrom: "COUNT(*) over gold.lap_times WHERE session_type = 'Race' AND under_vsc = true"
+      stability: potentially-unstable
+      notes: >
+        Inherits the potentially-unstable rating from gold.lap_times.under_vsc.
+        Same risk profile as laps_under_safety_car but for the 'VSC' category.
+
+    soft_lap_count:
+      derivedFrom: "COUNT(*) over gold.lap_times WHERE session_type = 'Race' AND compound = 'SOFT'"
+      stability: potentially-unstable
+      notes: >
+        Inherits the potentially-unstable rating from gold.lap_times.compound,
+        which itself inherits from /v1/stints. If Pirelli introduces new
+        compound types that the pipeline does not map correctly, laps that
+        should be SOFT may instead become UNKNOWN and be excluded from this
+        count. Monitor the UNKNOWN lap ratio in race sessions as a proxy for
+        compound data quality.
+
+    medium_lap_count:
+      derivedFrom: "COUNT(*) over gold.lap_times WHERE session_type = 'Race' AND compound = 'MEDIUM'"
+      stability: potentially-unstable
+      notes: Same compound stability caveat as soft_lap_count.
+
+    hard_lap_count:
+      derivedFrom: "COUNT(*) over gold.lap_times WHERE session_type = 'Race' AND compound = 'HARD'"
+      stability: potentially-unstable
+      notes: Same compound stability caveat as soft_lap_count.
