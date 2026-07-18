@@ -1,0 +1,582 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# F1 Data Product — Lap Times
+# Open Data Contract Standard (ODCS) v1.1.0
+# ──────────────────────────────────────────────────────────────────────────────
+
+dataContractSpecification: "1.1.0"
+
+id: "a2f8b3d1-6e74-4c9a-b5d2-1f0e7a3c8b4d"
+
+# ── Info ──────────────────────────────────────────────────────────────────────
+info:
+  title: "Lap Times"
+  version: "1.0.0"
+  owner: "f1-data-team"
+  description: >
+    Enriched lap-level data combining lap times, tyre compound, pit stop events,
+    and safety car context per driver per session. Each row represents a single
+    lap driven by a single driver within a single session. Data is assembled from
+    four OpenF1 endpoints — /v1/laps (timing), /v1/stints (tyre compound),
+    /v1/pit (pit stop durations), and /v1/race_control (safety car windows) —
+    and joined at the lap grain. The model is the primary fact table for race
+    strategy analysis, tyre degradation studies, and lap-time performance
+    comparisons.
+
+# ── Servers ───────────────────────────────────────────────────────────────────
+servers:
+  local:
+    type: duckdb
+    path: ./f1.duckdb
+    schema: gold
+    database: gold
+
+# ── Input Ports ───────────────────────────────────────────────────────────────
+# Documents upstream data product dependencies within this pipeline.
+# The sessions contract is the only gold-layer dependency; all four OpenF1
+# REST endpoints are documented separately in sourceEndpoints below.
+inputPorts:
+  sessions:
+    contractId: "7f3a2e1c-4b89-4d2f-9c7e-0a1b5f8d3e6a"
+    contractTitle: "Race Sessions"
+    table: gold.sessions
+    description: >
+      The Race Sessions gold model provides session-level metadata including
+      session type, circuit, country, and date range. Every row in lap_times
+      must have a matching session_key in gold.sessions; orphaned lap rows
+      (session_key not present in sessions) indicate a pipeline sequencing
+      failure — the sessions model must be fully loaded and validated before
+      the lap_times model is built.
+    joinKey: session_key
+    joinKeyType: integer
+
+# ── Models ────────────────────────────────────────────────────────────────────
+models:
+  lap_times:
+    type: table
+    description: >
+      One row per driver per lap per session. The composite primary key is
+      (session_key, driver_number, lap_number). Fields from /v1/laps form the
+      spine; tyre compound is resolved from /v1/stints by matching the lap
+      number to the stint's lap range; pit stop duration is joined from /v1/pit
+      on session_key + driver_number + lap_number; safety car flags are derived
+      by checking whether any race_control event of the relevant category falls
+      within the lap's time window.
+    fields:
+
+      session_key:
+        type: integer
+        description: >
+          Foreign key to gold.sessions.session_key. Identifies which session
+          this lap belongs to. Part of the composite primary key. Every value
+          must have a matching row in gold.sessions; the pipeline enforces this
+          by building sessions first and rejecting any lap rows that would
+          produce a dangling foreign key.
+        required: true
+        primaryKey: true
+        references: gold.sessions.session_key
+
+      driver_number:
+        type: integer
+        description: >
+          The race number assigned to the driver for the season (e.g. 1 for
+          Verstappen, 44 for Hamilton). Sourced from /v1/laps. Corresponds to
+          the driver_number field used consistently across all OpenF1 endpoints.
+          Part of the composite primary key.
+        required: true
+        primaryKey: true
+
+      lap_number:
+        type: integer
+        description: >
+          Sequential lap number within the session, starting at 1, as reported
+          by /v1/laps. Pit-out laps are assigned a lap number by OpenF1 and are
+          included. Part of the composite primary key. Must be strictly greater
+          than 0.
+        required: true
+        primaryKey: true
+
+      lap_duration:
+        type: number
+        description: >
+          Total lap time in seconds (floating point), as reported by /v1/laps.
+          Null on pit-out laps — because the lap timer begins before the car
+          exits the pit lane, no complete lap time can be recorded — and on laps
+          aborted mid-lap due to red flags, incidents, or chequered flag timing
+          edge cases. When not null, must be strictly greater than 0. Consumers
+          must filter IS NOT NULL before computing lap-time statistics.
+        required: false
+
+      duration_sector_1:
+        type: number
+        description: >
+          Time taken to complete sector 1 of the lap, in seconds. Sourced from
+          /v1/laps. Null when the lap was not completed (pit-out, aborted) or
+          when timing data was not captured by OpenF1. Important caveat: OpenF1
+          documents that sector times are not available during race sessions;
+          consumers should expect duration_sector_1/2/3 to be consistently null
+          for rows where the parent session_type is 'Race'.
+        required: false
+
+      duration_sector_2:
+        type: number
+        description: >
+          Time taken to complete sector 2 of the lap, in seconds. Sourced from
+          /v1/laps. Subject to the same nullability conditions as
+          duration_sector_1, including the race-session limitation.
+        required: false
+
+      duration_sector_3:
+        type: number
+        description: >
+          Time taken to complete sector 3 of the lap, in seconds. Sourced from
+          /v1/laps. Subject to the same nullability conditions as
+          duration_sector_1, including the race-session limitation.
+        required: false
+
+      compound:
+        type: string
+        description: >
+          The tyre compound fitted to the car during this lap, resolved from
+          /v1/stints by matching the stint whose (lap_start <= lap_number <=
+          lap_end) for the same session_key and driver_number. The compound
+          string from the API is uppercased and mapped to the canonical enum
+          during ingestion. UNKNOWN is the mandatory fallback for any lap where
+          no matching stint record exists, where the compound field is null in
+          the API response, or where the API returns a string not in the
+          accepted values list (e.g. a test compound or a new entry not yet
+          handled by the pipeline).
+        required: true
+        enum:
+          - SOFT
+          - MEDIUM
+          - HARD
+          - INTERMEDIATE
+          - WET
+          - UNKNOWN
+
+      is_pit_out_lap:
+        type: boolean
+        description: >
+          True if the driver exited the pit lane during this lap, as reported
+          directly by /v1/laps. On a pit-out lap the lap_duration will typically
+          be null (incomplete lap) or anomalously long (timer running from
+          before pit exit). Consumers computing tyre age should reset stint age
+          counters on rows where is_pit_out_lap is true.
+        required: true
+
+      pit_duration:
+        type: number
+        description: >
+          Duration of the pit stop served at the end of the preceding lap (i.e.
+          the stop whose out-lap is the current row), in seconds. Sourced from
+          /v1/pit, joined on session_key + driver_number + lap_number, where the
+          pit endpoint's lap_number refers to the lap on which the car entered
+          the pits. Null for any lap where the driver did not make a pit stop.
+          Available from the 2024 US Grand Prix onwards per OpenF1 documentation;
+          may be null for earlier events even when a pit stop occurred.
+        required: false
+
+      under_safety_car:
+        type: boolean
+        description: >
+          Derived field — not a raw OpenF1 attribute. True if a Safety Car
+          period was active during any portion of this lap. Derivation logic:
+          the lap's time window is defined as [date_start_of_lap,
+          date_start_of_next_lap_for_same_driver). Any record in /v1/race_control
+          with category = 'SafetyCar' whose date falls within that window causes
+          this flag to be set to true. The final lap of a session uses the
+          session's date_end as the upper bound. Required and non-null; defaults
+          to false when no race_control data is available for the session.
+        required: true
+
+      under_vsc:
+        type: boolean
+        description: >
+          Derived field — not a raw OpenF1 attribute. True if a Virtual Safety
+          Car (VSC) period was active during any portion of this lap. Derivation
+          logic is identical to under_safety_car but filtered to race_control
+          records where category = 'VSC'. A lap can be simultaneously true for
+          both under_safety_car and under_vsc if a VSC period transitioned to a
+          full Safety Car within the same lap window (rare but possible).
+          Required and non-null; defaults to false when no race_control data is
+          available for the session.
+        required: true
+
+# ── Quality ───────────────────────────────────────────────────────────────────
+quality:
+  # Engine hint: checks are expressed as declarative rules intended to be run
+  # via dbt tests, Soda Core, or equivalent against gold.lap_times in DuckDB.
+  # The composite PK and SQL-conditional checks require framework support for
+  # multi-column uniqueness and custom SQL assertions respectively.
+  checks:
+
+    - name: composite_pk_unique
+      description: >
+        The combination (session_key, driver_number, lap_number) must be
+        globally unique across the table. This is the composite primary key.
+        A duplicate means the pipeline performed a double-load or the lap
+        numbering logic assigned the same lap_number to two records for the
+        same driver in the same session. Must be resolved before downstream
+        aggregations are computed.
+      type: unique_combination
+      columns:
+        - session_key
+        - driver_number
+        - lap_number
+
+    - name: session_key_not_null
+      description: >
+        session_key is a component of the composite primary key and the foreign
+        key to gold.sessions. A null value makes the row impossible to associate
+        with a session and breaks all session-scoped joins.
+      type: not_null
+      column: session_key
+
+    - name: driver_number_not_null
+      description: >
+        driver_number is a component of the composite primary key. A null value
+        makes the row unattributable to any driver and breaks all driver-scoped
+        aggregations and comparisons.
+      type: not_null
+      column: driver_number
+
+    - name: lap_number_not_null
+      description: >
+        lap_number is a component of the composite primary key. A null value
+        prevents correct ordering of laps within a stint and makes tyre-age
+        calculations impossible.
+      type: not_null
+      column: lap_number
+
+    - name: compound_accepted_values
+      description: >
+        compound must belong to the six-value normalised enum. A value outside
+        this set means the ingestion mapping encountered a compound string from
+        /v1/stints that was not handled — most likely a new Pirelli compound or
+        a testing compound. The pipeline must catch these at mapping time and
+        write UNKNOWN rather than passing through an unrecognised raw string.
+      type: accepted_values
+      column: compound
+      values:
+        - SOFT
+        - MEDIUM
+        - HARD
+        - INTERMEDIATE
+        - WET
+        - UNKNOWN
+
+    - name: lap_number_positive
+      description: >
+        lap_number must be strictly greater than 0. OpenF1 documents that lap
+        numbering starts at 1; a zero or negative value indicates either a
+        parsing failure in the ingestion layer or corruption in the source data.
+      type: range
+      column: lap_number
+      min: 1
+
+    - name: lap_duration_positive_when_not_null
+      description: >
+        When lap_duration is not null, it must be strictly greater than 0. A
+        zero or negative lap time is physically impossible and indicates a unit
+        conversion error, a timestamp subtraction underflow, or data corruption.
+        This check intentionally does not fail on null values — nulls are
+        expected and permitted (see field description).
+      type: sql
+      query: >
+        SELECT COUNT(*)
+        FROM gold.lap_times
+        WHERE lap_duration IS NOT NULL
+          AND lap_duration <= 0
+      mustBe: 0
+
+# ── Source Endpoints (custom extension) ───────────────────────────────────────
+#
+# This section is a project-level extension and is not part of the ODCS 1.1.0
+# core specification. It documents the four OpenF1 REST endpoints that feed
+# this model, the join keys used at each stage, and which contract fields each
+# endpoint contributes. This is the lineage record for the gold model.
+#
+sourceEndpoints:
+  endpoints:
+
+    laps:
+      url: "https://api.openf1.org/v1/laps"
+      description: >
+        Primary source and spine of the lap_times model. Provides one record
+        per driver per lap per session. Forms the base grain to which all other
+        endpoints are joined. Also provides date_start for each lap, which is
+        used internally to derive the time window needed for safety car flag
+        derivation (not surfaced as a column in the gold model).
+      joinKeys:
+        primary:
+          - session_key
+          - driver_number
+          - lap_number
+      providesFields:
+        - lap_number
+        - lap_duration
+        - duration_sector_1
+        - duration_sector_2
+        - duration_sector_3
+        - is_pit_out_lap
+      internalFields:
+        - date_start   # used for safety car window derivation; not in gold model
+
+    pit:
+      url: "https://api.openf1.org/v1/pit"
+      description: >
+        Source for pit stop duration. Joined to the lap spine on
+        (session_key, driver_number, lap_number), where the pit endpoint's
+        lap_number field refers to the lap on which the car entered the pits —
+        this corresponds to the is_pit_out_lap=true lap in the laps endpoint
+        (the lap number after the stop). The join is a LEFT JOIN; unmatched
+        lap rows receive pit_duration = null. Note that stop_duration (the
+        stationary time only) is available from the 2024 US GP onwards; this
+        model uses lane_duration (total pit lane traversal time) for full
+        historical coverage under the alias pit_duration.
+      joinKeys:
+        primary:
+          - session_key
+          - driver_number
+          - lap_number
+      providesFields:
+        - pit_duration   # sourced from pit.lane_duration, aliased at ingestion
+
+    stints:
+      url: "https://api.openf1.org/v1/stints"
+      description: >
+        Source for tyre compound. The stints endpoint provides one record per
+        stint per driver per session, with each stint covering a contiguous
+        range of laps (lap_start to lap_end inclusive). Join strategy: for each
+        lap row, find the single stint record where session_key matches,
+        driver_number matches, and lap_start <= lap_number <= lap_end. This
+        resolves to the compound in use for that lap. If no matching stint
+        record is found, compound is set to UNKNOWN. The compound string from
+        the API is normalised to uppercase before enum mapping.
+      joinKeys:
+        primary:
+          - session_key
+          - driver_number
+        rangeKey:
+          column: lap_number
+          resolvedFrom: lap_start
+          resolvedTo: lap_end
+      providesFields:
+        - compound
+
+    race_control:
+      url: "https://api.openf1.org/v1/race_control"
+      description: >
+        Source for safety car and VSC event timestamps. Filtered at ingestion
+        to records where category IN ('SafetyCar', 'VSC'). NOT joined on
+        lap_number directly — the join is time-window based. For each lap row
+        the time window [date_start_of_lap, date_start_of_next_lap) is computed
+        using the date_start values from /v1/laps. A race_control record whose
+        date falls within that window sets the corresponding boolean flag. The
+        final lap of a session uses session date_end (from /v1/sessions) as the
+        window upper bound.
+      joinKeys:
+        primary:
+          - session_key
+        timeWindowBased:
+          lapWindowStart: laps.date_start          # from /v1/laps
+          lapWindowEnd: laps.date_start (next lap) # or sessions.date_end for final lap
+          eventDate: race_control.date
+        filterBy:
+          column: category
+          values:
+            - SafetyCar
+            - VSC
+      providesFields:
+        - under_safety_car   # true when any SafetyCar event falls in lap window
+        - under_vsc          # true when any VSC event falls in lap window
+
+# ── Upstream Stability (custom extension) ────────────────────────────────────
+#
+# Project-level extension. Documents per-field stability assumptions across
+# the 2023 and 2024 seasons, and flags fields that carry elevated risk due to
+# API behaviour or derivation complexity. Same pattern as sessions contract.
+#
+upstreamStability:
+  sources:
+    - "OpenF1 /v1/laps"
+    - "OpenF1 /v1/stints"
+    - "OpenF1 /v1/pit"
+    - "OpenF1 /v1/race_control"
+  assumption: >
+    The OpenF1 API schema is considered stable for all raw fields listed in
+    this contract as of the 2023 and 2024 seasons. Derived fields (under_safety_car,
+    under_vsc) carry additional risk because their values depend on both the
+    stability of the race_control schema and the correctness of the derivation
+    logic in the pipeline; a change in how OpenF1 categorises safety car events
+    would silently produce wrong boolean values without a schema-level warning.
+  breakingChangePolicy: >
+    Any breaking change in an OpenF1 endpoint schema that affects a field listed
+    in the models section of this contract MUST trigger a contract version bump
+    (major bump for removed/renamed/retyped raw fields; minor bump for new
+    optional fields). Changes to derivation logic for under_safety_car or
+    under_vsc that alter the boolean semantics also require a minor version bump.
+    The ingestion pipeline must be updated in the same PR as the contract bump.
+  additiveChangePolicy: >
+    New fields returned by OpenF1 endpoints that are not yet in this contract
+    may be silently ignored. They should be reviewed for inclusion in the next
+    planned minor version.
+  fields:
+
+    session_key:
+      sourceEndpoint: "/v1/laps"
+      upstreamField: "session_key"
+      presentIn2023: true
+      presentIn2024: true
+      stability: stable
+      notes: >
+        Core cross-endpoint identifier. Present and consistent across all
+        observed seasons and all four source endpoints. Low risk.
+
+    driver_number:
+      sourceEndpoint: "/v1/laps"
+      upstreamField: "driver_number"
+      presentIn2023: true
+      presentIn2024: true
+      stability: stable
+      notes: >
+        Consistent across all OpenF1 endpoints as the driver identifier.
+        Driver numbers are season-scoped (a number can be reassigned between
+        seasons) but stable within a season. Low risk.
+
+    lap_number:
+      sourceEndpoint: "/v1/laps"
+      upstreamField: "lap_number"
+      presentIn2023: true
+      presentIn2024: true
+      stability: stable
+      notes: >
+        Present and sequentially consistent across both seasons. The OpenF1
+        documentation confirms it starts at 1. Low risk.
+
+    lap_duration:
+      sourceEndpoint: "/v1/laps"
+      upstreamField: "lap_duration"
+      presentIn2023: true
+      presentIn2024: true
+      stability: stable
+      notes: >
+        Present in both seasons. Expected null on pit-out and aborted laps;
+        this nullable behaviour is well-documented by OpenF1 and has been
+        consistent. Low risk.
+
+    duration_sector_1:
+      sourceEndpoint: "/v1/laps"
+      upstreamField: "duration_sector_1"
+      presentIn2023: true
+      presentIn2024: true
+      stability: stable-with-caveat
+      notes: >
+        Present in both seasons for practice and qualifying sessions. OpenF1
+        explicitly documents that sector times are unavailable for race
+        sessions — this is an intentional API limitation, not missing data.
+        Consumers must be aware of this caveat. Low risk on field presence;
+        medium risk on data completeness depending on session type.
+
+    duration_sector_2:
+      sourceEndpoint: "/v1/laps"
+      upstreamField: "duration_sector_2"
+      presentIn2023: true
+      presentIn2024: true
+      stability: stable-with-caveat
+      notes: Same caveat as duration_sector_1 regarding race sessions.
+
+    duration_sector_3:
+      sourceEndpoint: "/v1/laps"
+      upstreamField: "duration_sector_3"
+      presentIn2023: true
+      presentIn2024: true
+      stability: stable-with-caveat
+      notes: Same caveat as duration_sector_1 regarding race sessions.
+
+    compound:
+      sourceEndpoint: "/v1/stints"
+      upstreamField: "compound"
+      presentIn2023: true
+      presentIn2024: true
+      stability: potentially-unstable
+      notes: >
+        ⚠ ELEVATED RISK. The compound field is present and functional across
+        both seasons, but the set of possible values is controlled by Pirelli
+        and the FIA, not by OpenF1. Observed values in 2023–2024 include SOFT,
+        MEDIUM, HARD, INTERMEDIATE, and WET. However, unknown or testing
+        compounds (e.g. prototype compounds used in Friday practice) have been
+        observed to appear as null, empty string, or an unrecognised label in
+        the raw API. Additionally, if Pirelli introduces a new compound
+        category (e.g. a SUPERSOFT or HYPERSOFT revival) the pipeline mapping
+        logic would need to be updated before the new value could be passed
+        through — until then it would silently map to UNKNOWN. The pipeline
+        must log all unmapped compound strings for monitoring. This field must
+        be treated as an open enum in practice even though the contract declares
+        a closed enum with UNKNOWN as the escape hatch.
+
+    is_pit_out_lap:
+      sourceEndpoint: "/v1/laps"
+      upstreamField: "is_pit_out_lap"
+      presentIn2023: true
+      presentIn2024: true
+      stability: stable
+      notes: >
+        Boolean field, present across both seasons. Consistent with lap_duration
+        being null on the same rows. Low risk.
+
+    pit_duration:
+      sourceEndpoint: "/v1/pit"
+      upstreamField: "lane_duration"
+      presentIn2023: true
+      presentIn2024: true
+      stability: stable-with-caveat
+      notes: >
+        The /v1/pit endpoint has been present since 2023. However, the
+        stop_duration sub-field (stationary time only, separate from pit lane
+        traversal time) was only added from the 2024 US Grand Prix onwards per
+        OpenF1 documentation. This contract uses lane_duration (full pit lane
+        time) aliased as pit_duration, which has broader historical availability.
+        The API also deprecated pit_duration as a field name in favour of
+        lane_duration — ensure the ingestion pipeline reads lane_duration, not
+        the deprecated alias.
+
+    under_safety_car:
+      sourceEndpoint: "/v1/race_control (derived)"
+      upstreamField: null   # not a raw field — computed from race_control events
+      presentIn2023: true
+      presentIn2024: true
+      stability: potentially-unstable
+      notes: >
+        ⚠ DERIVED FIELD. This boolean is not returned directly by any OpenF1
+        endpoint. It is computed in the pipeline using the following logic: for
+        each lap, check whether any record in /v1/race_control with
+        category = 'SafetyCar' has a date that falls within the lap's time
+        window [date_start_of_lap, date_start_of_next_lap). Two sources of
+        instability exist: (1) if OpenF1 renames or changes the value of the
+        category field for safety car events, the filter will silently miss
+        events and all affected laps will incorrectly show false; (2) the
+        time-window derivation depends on date_start being present and accurate
+        in /v1/laps, which carries its own caveat (see date_start stability note
+        in sourceEndpoints above). Any change to race_control categorisation
+        must trigger a pipeline review and potentially a contract version bump.
+        Default value is false when no race_control data is available for the
+        session (e.g. testing sessions or sessions with incomplete data).
+
+    under_vsc:
+      sourceEndpoint: "/v1/race_control (derived)"
+      upstreamField: null   # not a raw field — computed from race_control events
+      presentIn2023: true
+      presentIn2024: true
+      stability: potentially-unstable
+      notes: >
+        ⚠ DERIVED FIELD. Same derivation pattern as under_safety_car but
+        filtered to category = 'VSC'. Carries identical risks: a rename of the
+        VSC category string in /v1/race_control would silently produce incorrect
+        false values for all VSC-period laps. Note that VSC deployments are
+        shorter and more precise than full Safety Car periods; the time-window
+        resolution of the lap grain may occasionally produce ambiguous results
+        at VSC boundaries (e.g. if a VSC is deployed and lifted within the same
+        lap window, the flag will still be true). This is considered acceptable
+        precision for the intended use cases (strategy analysis) but should be
+        disclosed to consumers doing exact regulatory compliance analysis.
