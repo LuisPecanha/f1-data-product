@@ -1,0 +1,88 @@
+version: 2
+
+models:
+  - name: gold_sessions
+    description: >
+      Canonical gold-layer representation of every Formula 1 race weekend
+      session sourced from the OpenF1 REST API. Each row describes a single
+      session (Practice 1/2/3, Qualifying, Sprint, Sprint Shootout, or Race)
+      including its timing, circuit, and country metadata. This product is
+      the authoritative source for session filtering and time-window joins
+      used by all downstream F1 analytics models.
+    columns:
+      - name: session_key
+        description: >
+          Globally unique integer identifier for a session, assigned by
+          OpenF1. This is the natural primary key of the model and the
+          recommended join key for all downstream fact tables (lap times,
+          telemetry, pit stops).
+        tests:
+          - not_null
+          - unique
+
+      - name: session_name
+        description: >
+          Human-readable session label as returned verbatim by the OpenF1
+          API. Representative values include: "Race", "Qualifying",
+          "Practice 1", "Practice 2", "Practice 3", "Sprint",
+          "Sprint Shootout". Consumers should not hardcode against this
+          field — use session_type instead for categorical filtering.
+
+      - name: session_type
+        description: >
+          Normalised, coarser session category derived from session_name
+          during ingestion. Collapsed to one of four canonical values so
+          that downstream models can filter reliably without parsing
+          free-text labels. "Sprint" covers both Sprint races and Sprint
+          Shootout qualifying sessions.
+        tests:
+          - accepted_values:
+              arguments:
+                values:
+                  - Practice
+                  - Qualifying
+                  - Race
+                  - Sprint
+
+      - name: date_start
+        description: >
+          UTC timestamp at which the session officially began, as reported
+          by OpenF1. Used as the primary time anchor for all session-scoped
+          event joins.
+        tests:
+          - not_null
+
+      - name: date_end
+        description: >
+          UTC timestamp at which the session officially ended, as reported
+          by OpenF1. May be null for sessions that were cancelled,
+          red-flagged without a restart, or whose end time was not captured
+          by the API.
+
+      - name: year
+        description: >
+          Four-digit calendar year in which the session took place. Derived
+          from date_start during ingestion and materialised as a convenience
+          partition column to avoid full-table scans on single-season
+          queries.
+        tests:
+          - not_null
+
+      - name: circuit_short_name
+        description: >
+          Abbreviated circuit identifier as returned by OpenF1 (e.g.
+          "Monza", "Silverstone", "Suzuka"). Not a stable enum — new values
+          are introduced whenever a new venue joins the FIA calendar.
+
+      - name: country_name
+        description: >
+          Full English name of the host country as returned by OpenF1
+          (e.g. "Italy", "United Kingdom", "Japan"). Not a formal ISO-3166
+          code.
+
+      - name: location
+        description: >
+          City or locality name associated with the circuit, as returned by
+          OpenF1 (e.g. "Monza", "Spa-Francorchamps", "Lusail"). In practice
+          this often duplicates circuit_short_name but may differ for
+          circuits that share a city with multiple venues.
