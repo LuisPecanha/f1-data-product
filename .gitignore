@@ -1,5 +1,5 @@
 # Python
-.venv/
+.venv*/
 __pycache__/
 *.pyc
 
@@ -12,3 +12,6 @@ dbt_f1/.user.yml
 # DuckDB
 f1.duckdb
 f1.duckdb.wal
+
+# generated exports (datacontract test targets, rebuilt from gold tables)
+exports/
