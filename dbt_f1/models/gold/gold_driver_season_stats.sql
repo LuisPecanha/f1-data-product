@@ -78,17 +78,17 @@ select
     driver_meta.year,
     driver_meta.driver_name,
     driver_meta.team_name,
-    coalesce(total_laps_cte.total_laps, 0) as total_laps,
-    coalesce(aggregated.total_race_laps, 0) as total_race_laps,
-    aggregated.avg_lap_duration_seconds,
-    aggregated.fastest_lap_seconds,
-    coalesce(aggregated.total_pit_stops, 0) as total_pit_stops,
-    aggregated.avg_pit_duration_seconds,
-    coalesce(aggregated.laps_under_safety_car, 0) as laps_under_safety_car,
-    coalesce(aggregated.laps_under_vsc, 0) as laps_under_vsc,
-    coalesce(aggregated.soft_lap_count, 0) as soft_lap_count,
-    coalesce(aggregated.medium_lap_count, 0) as medium_lap_count,
-    coalesce(aggregated.hard_lap_count, 0) as hard_lap_count
+    cast(coalesce(total_laps_cte.total_laps, 0) as integer) as total_laps,
+    cast(coalesce(aggregated.total_race_laps, 0) as integer) as total_race_laps,
+    cast(aggregated.avg_lap_duration_seconds as decimal(10, 3)) as avg_lap_duration_seconds,
+    cast(aggregated.fastest_lap_seconds as decimal(10, 3)) as fastest_lap_seconds,
+    cast(coalesce(aggregated.total_pit_stops, 0) as integer) as total_pit_stops,
+    cast(aggregated.avg_pit_duration_seconds as decimal(10, 3)) as avg_pit_duration_seconds,
+    cast(coalesce(aggregated.laps_under_safety_car, 0) as integer) as laps_under_safety_car,
+    cast(coalesce(aggregated.laps_under_vsc, 0) as integer) as laps_under_vsc,
+    cast(coalesce(aggregated.soft_lap_count, 0) as integer) as soft_lap_count,
+    cast(coalesce(aggregated.medium_lap_count, 0) as integer) as medium_lap_count,
+    cast(coalesce(aggregated.hard_lap_count, 0) as integer) as hard_lap_count
 from driver_meta
 left join total_laps_cte
     on driver_meta.driver_number = total_laps_cte.driver_number
