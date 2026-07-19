@@ -151,10 +151,10 @@ casted as (
         cast(session_key as integer) as session_key,
         cast(driver_number as integer) as driver_number,
         cast(lap_number as integer) as lap_number,
-        cast(lap_duration as double) as lap_duration,
-        cast(duration_sector_1 as double) as duration_sector_1,
-        cast(duration_sector_2 as double) as duration_sector_2,
-        cast(duration_sector_3 as double) as duration_sector_3,
+        cast(lap_duration as decimal(10, 3)) as lap_duration,
+        cast(duration_sector_1 as decimal(10, 3)) as duration_sector_1,
+        cast(duration_sector_2 as decimal(10, 3)) as duration_sector_2,
+        cast(duration_sector_3 as decimal(10, 3)) as duration_sector_3,
         -- any raw compound outside the accepted enum (e.g. a testing
         -- compound like 'TEST_UNKNOWN') must fall back to UNKNOWN, not
         -- pass through unrecognised — see the compound field in the
@@ -165,7 +165,7 @@ casted as (
             else 'UNKNOWN'
         end as compound,
         coalesce(cast(is_pit_out_lap as boolean), false) as is_pit_out_lap,
-        cast(pit_duration as double) as pit_duration,
+        cast(pit_duration as decimal(10, 3)) as pit_duration,
         coalesce(cast(under_safety_car as boolean), false) as under_safety_car,
         coalesce(cast(under_vsc as boolean), false) as under_vsc
     from joined
