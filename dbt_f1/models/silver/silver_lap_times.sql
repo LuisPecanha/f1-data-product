@@ -155,7 +155,15 @@ casted as (
         cast(duration_sector_1 as double) as duration_sector_1,
         cast(duration_sector_2 as double) as duration_sector_2,
         cast(duration_sector_3 as double) as duration_sector_3,
-        coalesce(cast(compound as varchar), 'UNKNOWN') as compound,
+        -- any raw compound outside the accepted enum (e.g. a testing
+        -- compound like 'TEST_UNKNOWN') must fall back to UNKNOWN, not
+        -- pass through unrecognised — see the compound field in the
+        -- lap_times contract
+        case
+            when upper(cast(compound as varchar)) in ('SOFT', 'MEDIUM', 'HARD', 'INTERMEDIATE', 'WET')
+                then upper(cast(compound as varchar))
+            else 'UNKNOWN'
+        end as compound,
         coalesce(cast(is_pit_out_lap as boolean), false) as is_pit_out_lap,
         cast(pit_duration as double) as pit_duration,
         coalesce(cast(under_safety_car as boolean), false) as under_safety_car,
