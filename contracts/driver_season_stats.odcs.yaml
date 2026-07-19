@@ -161,6 +161,8 @@ models:
 
       avg_lap_duration_seconds:
         type: number
+        precision: 10
+        scale: 3
         description: >
           Mean lap time in seconds across all valid laps in Race sessions for
           this driver and season. "Valid" means lap_duration IS NOT NULL and
@@ -173,6 +175,8 @@ models:
 
       fastest_lap_seconds:
         type: number
+        precision: 10
+        scale: 3
         description: >
           The single fastest valid lap time in seconds across all Race sessions
           for this driver and season. "Valid" means lap_duration IS NOT NULL
@@ -198,6 +202,8 @@ models:
 
       avg_pit_duration_seconds:
         type: number
+        precision: 10
+        scale: 3
         description: >
           Mean pit stop duration in seconds across all Race sessions for this
           driver and season. Calculated as the mean of pit_duration values

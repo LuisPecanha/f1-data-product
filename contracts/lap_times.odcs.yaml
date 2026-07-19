@@ -100,6 +100,8 @@ models:
 
       lap_duration:
         type: number
+        precision: 10
+        scale: 3
         description: >
           Total lap time in seconds (floating point), as reported by /v1/laps.
           Null on pit-out laps — because the lap timer begins before the car
@@ -111,6 +113,8 @@ models:
 
       duration_sector_1:
         type: number
+        precision: 10
+        scale: 3
         description: >
           Time taken to complete sector 1 of the lap, in seconds. Sourced from
           /v1/laps. Null when the lap was not completed (pit-out, aborted) or
@@ -122,6 +126,8 @@ models:
 
       duration_sector_2:
         type: number
+        precision: 10
+        scale: 3
         description: >
           Time taken to complete sector 2 of the lap, in seconds. Sourced from
           /v1/laps. Subject to the same nullability conditions as
@@ -130,6 +136,8 @@ models:
 
       duration_sector_3:
         type: number
+        precision: 10
+        scale: 3
         description: >
           Time taken to complete sector 3 of the lap, in seconds. Sourced from
           /v1/laps. Subject to the same nullability conditions as
@@ -169,6 +177,8 @@ models:
 
       pit_duration:
         type: number
+        precision: 10
+        scale: 3
         description: >
           Duration of the pit stop served at the end of the preceding lap (i.e.
           the stop whose out-lap is the current row), in seconds. Sourced from
