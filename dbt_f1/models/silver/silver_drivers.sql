@@ -34,14 +34,24 @@ deduplicated as (
         cast(year as integer) as year,
         cast(full_name as varchar) as driver_name,
         cast(team_name as varchar) as team_name,
+        -- prefer a record with a resolvable team_name over the merely
+        -- most-recent one: some sessions (e.g. a young-driver test outing)
+        -- return a driver record with team_name null, and picking that as
+        -- "most recent" would surface a null team_name even when an
+        -- earlier session in the same year has the real team on file
         row_number() over (
             partition by driver_number, year
-            order by session_key desc
+            order by (team_name is not null) desc, session_key desc
         ) as rn
     from drivers_with_year
 
 )
 
+-- per the contract's fallback rule for driver_name/team_name resolution,
+-- a driver-year with no resolvable team_name anywhere in the source data
+-- (not just on the most recent record) must not be emitted with a null
+-- team_name — excluded here rather than passed through, since building
+-- a full quarantine table is out of scope for this model
 select
     driver_number,
     year,
@@ -49,3 +59,4 @@ select
     team_name
 from deduplicated
 where rn = 1
+  and team_name is not null
