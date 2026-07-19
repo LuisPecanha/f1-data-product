@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install ingestion deps
+        run: pip install -r requirements.txt
+        working-directory: ingestion
+
+      - name: Install dbt deps
+        run: |
+          pip install dbt-core==1.12.0 dbt-duckdb==1.10.1
+          dbt deps
+        working-directory: dbt_f1
+        env:
+          DBT_PROFILES_DIR: .
+
+      - name: Install datacontract-cli
+        run: pip install datacontract-cli
+
+      - name: Run ingestion pipeline
+        run: python ingestion/pipeline.py
+
+      - name: Run dbt
+        run: |
+          dbt run
+          dbt test
+        working-directory: dbt_f1
+        env:
+          DBT_PROFILES_DIR: .
+
+      - name: Export gold to Parquet
+        run: python scripts/export_gold_to_parquet.py
+
+      - name: Run datacontract test
+        run: |
+          datacontract test contracts/sessions.odcs.yaml
+          datacontract test contracts/lap_times.odcs.yaml
+          datacontract test contracts/driver_season_stats.odcs.yaml
