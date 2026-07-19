@@ -1,0 +1,140 @@
+version: 2
+
+models:
+  - name: gold_driver_season_stats
+    description: >
+      Season-level aggregation per driver, derived entirely from the
+      sessions and lap_times gold models. Each row represents a single
+      driver's performance summary for a single Formula 1 season. The
+      primary gold output port of the F1 data product — the table most
+      downstream consumers (dashboards, reports, season comparisons) will
+      query directly. Unless a field description explicitly states
+      otherwise, all aggregations are scoped to sessions where
+      session_type = 'Race'.
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns:
+              - driver_number
+              - year
+    columns:
+      - name: driver_number
+        description: >
+          The race number assigned to the driver for the season. Part of
+          the composite primary key. Driver numbers are season-scoped — the
+          same number can be reassigned between seasons — so driver_number
+          alone does not uniquely identify a driver across multiple years.
+        tests:
+          - not_null
+
+      - name: year
+        description: >
+          The four-digit calendar year of the season. Sourced from
+          gold.sessions.year via the session_key join. Part of the
+          composite primary key.
+        tests:
+          - not_null
+
+      - name: driver_name
+        description: >
+          The driver's full name as returned by the OpenF1 /v1/drivers
+          endpoint. Resolved using the most recent /v1/drivers record for
+          this driver_number within the season.
+        tests:
+          - not_null
+
+      - name: team_name
+        description: >
+          The constructor name for the driver in this season, as returned
+          by the OpenF1 /v1/drivers endpoint. Resolved using the most
+          recent /v1/drivers record for this driver_number within the
+          season. For drivers who changed constructor mid-season, this
+          reflects the most recent team, not the team with the most laps
+          driven.
+        tests:
+          - not_null
+
+      - name: total_laps
+        description: >
+          Total number of laps recorded for this driver across ALL session
+          types in the season (Practice, Qualifying, Sprint, and Race). Not
+          filtered by session_type. A lap is counted regardless of whether
+          lap_duration is null.
+        tests:
+          - not_null
+
+      - name: total_race_laps
+        description: >
+          Total number of laps recorded for this driver in sessions where
+          session_type = 'Race' only. Null lap_duration rows are still
+          counted. Always less than or equal to total_laps. A value of 0
+          indicates the driver did not start or complete any race laps in
+          the season.
+        tests:
+          - not_null
+
+      - name: avg_lap_duration_seconds
+        description: >
+          Mean lap time in seconds across all valid laps (lap_duration IS
+          NOT NULL and > 0) in Race sessions for this driver and season.
+          Null when the driver has no valid race laps in the season.
+
+      - name: fastest_lap_seconds
+        description: >
+          The single fastest valid lap time in seconds across all Race
+          sessions for this driver and season. Equivalent to
+          MIN(lap_duration) filtered to Race sessions with non-null
+          durations. Null under the same conditions as
+          avg_lap_duration_seconds.
+
+      - name: total_pit_stops
+        description: >
+          Total number of pit stops made by the driver across all Race
+          sessions in the season. Counted as the number of lap_times rows
+          in Race sessions where pit_duration IS NOT NULL. Pit duration
+          data has partial availability prior to the 2024 US Grand Prix;
+          counts for the 2023 season and early 2024 may be understated.
+        tests:
+          - not_null
+
+      - name: avg_pit_duration_seconds
+        description: >
+          Mean pit stop duration in seconds across all Race sessions for
+          this driver and season. Null when the driver has no non-null
+          pit_duration records in race sessions.
+
+      - name: laps_under_safety_car
+        description: >
+          Count of laps in Race sessions where under_safety_car = true.
+          Sourced directly from gold.lap_times.under_safety_car.
+        tests:
+          - not_null
+
+      - name: laps_under_vsc
+        description: >
+          Count of laps in Race sessions where under_vsc = true. Sourced
+          from gold.lap_times.under_vsc. A single lap can contribute to
+          both laps_under_safety_car and laps_under_vsc.
+        tests:
+          - not_null
+
+      - name: soft_lap_count
+        description: >
+          Count of laps in Race sessions where compound = 'SOFT'. Laps
+          where compound = 'UNKNOWN' are excluded from this count.
+        tests:
+          - not_null
+
+      - name: medium_lap_count
+        description: >
+          Count of laps in Race sessions where compound = 'MEDIUM'. Same
+          counting logic and UNKNOWN exclusion as soft_lap_count.
+        tests:
+          - not_null
+
+      - name: hard_lap_count
+        description: >
+          Count of laps in Race sessions where compound = 'HARD'. Same
+          counting logic and UNKNOWN exclusion as soft_lap_count.
+        tests:
+          - not_null
