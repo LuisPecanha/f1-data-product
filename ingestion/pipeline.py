@@ -69,6 +69,21 @@ def openf1_lap_times_source():
     return laps, pit, stints, race_control
 
 
+@dlt.source
+def openf1_drivers_source():
+
+    @dlt.resource(
+        primary_key=["session_key", "driver_number"],
+        write_disposition="replace",
+    )
+    def drivers():
+        response = requests.get(f"{BASE_URL}/v1/drivers", timeout=120)
+        response.raise_for_status()
+        yield response.json()
+
+    return drivers
+
+
 def run_sessions_pipeline():
     pipeline = dlt.pipeline(
         pipeline_name="f1_sessions",
@@ -91,6 +106,18 @@ def run_lap_times_pipeline():
     return load_info
 
 
+def run_drivers_pipeline():
+    pipeline = dlt.pipeline(
+        pipeline_name="f1_drivers",
+        destination=dlt.destinations.duckdb(credentials=str(DB_PATH)),
+        dataset_name="bronze",
+    )
+    load_info = pipeline.run(openf1_drivers_source())
+    print(load_info)
+    return load_info
+
+
 if __name__ == "__main__":
     run_sessions_pipeline()
     run_lap_times_pipeline()
+    run_drivers_pipeline()
