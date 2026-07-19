@@ -25,10 +25,13 @@ info:
 # ── Servers ───────────────────────────────────────────────────────────────────
 servers:
   local:
-    type: duckdb
-    path: ./f1.duckdb
-    schema: gold
-    database: gold
+    # datacontract-cli has no support for a live "duckdb" database-file
+    # server type — see the sessions contract for the full note. Exported
+    # to Parquet by scripts/export_gold_to_parquet.py after every dbt run;
+    # gold.lap_times in f1.duckdb remains the source of truth.
+    type: local
+    path: ./exports/lap_times.parquet
+    format: parquet
 
 # ── Input Ports ───────────────────────────────────────────────────────────────
 # Documents upstream data product dependencies within this pipeline.

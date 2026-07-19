@@ -29,10 +29,13 @@ info:
 # ── Servers ───────────────────────────────────────────────────────────────────
 servers:
   local:
-    type: duckdb
-    path: ./f1.duckdb
-    schema: gold
-    database: gold
+    # datacontract-cli has no support for a live "duckdb" database-file
+    # server type — see the sessions contract for the full note. Exported
+    # to Parquet by scripts/export_gold_to_parquet.py after every dbt run;
+    # gold.driver_season_stats in f1.duckdb remains the source of truth.
+    type: local
+    path: ./exports/driver_season_stats.parquet
+    format: parquet
 
 # ── Input Ports ───────────────────────────────────────────────────────────────
 # Both upstream gold contracts must be fully loaded and validated before this

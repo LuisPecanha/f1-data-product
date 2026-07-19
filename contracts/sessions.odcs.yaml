@@ -24,13 +24,17 @@ info:
 # ── Servers ───────────────────────────────────────────────────────────────────
 servers:
   local:
-    type: duckdb
-    path: ./f1.duckdb
-    # DuckDB uses the concept of a schema within an in-process database file.
-    # The gold schema is the output-port layer written by the transformation
-    # pipeline; consumers should connect directly to this schema.
-    schema: gold
-    database: gold
+    # datacontract-cli has no support for a live "duckdb" database-file
+    # server type (verified against the CLI's soda-core engine dispatch,
+    # v1.0.13 and v0.10.39 alike) — it only executes checks against local
+    # file servers (csv/json/parquet/delta). The gold.sessions table is
+    # exported to Parquet by scripts/export_gold_to_parquet.py after every
+    # dbt run so `datacontract test` has a real, readable target; the
+    # source of truth for the table itself remains gold.sessions in
+    # f1.duckdb.
+    type: local
+    path: ./exports/sessions.parquet
+    format: parquet
 
 # ── Models ────────────────────────────────────────────────────────────────────
 models:
