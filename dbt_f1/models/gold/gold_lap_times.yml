@@ -1,0 +1,117 @@
+version: 2
+
+models:
+  - name: gold_lap_times
+    description: >
+      Enriched lap-level data combining lap times, tyre compound, pit stop
+      events, and safety car context per driver per session. Each row
+      represents a single lap driven by a single driver within a single
+      session. Assembled from OpenF1 laps, stints, pit, and race_control
+      data joined at the lap grain. The primary fact table for race
+      strategy analysis, tyre degradation studies, and lap-time performance
+      comparisons.
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns:
+              - session_key
+              - driver_number
+              - lap_number
+    columns:
+      - name: session_key
+        description: >
+          Foreign key to gold.sessions.session_key. Identifies which
+          session this lap belongs to. Part of the composite primary key.
+        tests:
+          - not_null
+
+      - name: driver_number
+        description: >
+          The race number assigned to the driver for the season (e.g. 1 for
+          Verstappen, 44 for Hamilton). Part of the composite primary key.
+        tests:
+          - not_null
+
+      - name: lap_number
+        description: >
+          Sequential lap number within the session, starting at 1.
+          Pit-out laps are assigned a lap number and are included. Part of
+          the composite primary key. Must be strictly greater than 0.
+        tests:
+          - not_null
+
+      - name: lap_duration
+        description: >
+          Total lap time in seconds. Null on pit-out laps and on laps
+          aborted mid-lap due to red flags, incidents, or chequered flag
+          timing edge cases. When not null, must be strictly greater
+          than 0.
+
+      - name: duration_sector_1
+        description: >
+          Time taken to complete sector 1 of the lap, in seconds. Null when
+          the lap was not completed or when timing data was not captured.
+          Consistently null for rows where the parent session_type is
+          'Race', since OpenF1 does not provide sector times for race
+          sessions.
+
+      - name: duration_sector_2
+        description: >
+          Time taken to complete sector 2 of the lap, in seconds. Subject
+          to the same nullability conditions as duration_sector_1.
+
+      - name: duration_sector_3
+        description: >
+          Time taken to complete sector 3 of the lap, in seconds. Subject
+          to the same nullability conditions as duration_sector_1.
+
+      - name: compound
+        description: >
+          The tyre compound fitted to the car during this lap, resolved
+          from the stint whose lap range covers this lap number. UNKNOWN is
+          the mandatory fallback for any lap where no matching stint record
+          exists, the compound field is null, or the API returns a string
+          outside the accepted values list.
+        tests:
+          - accepted_values:
+              arguments:
+                values:
+                  - SOFT
+                  - MEDIUM
+                  - HARD
+                  - INTERMEDIATE
+                  - WET
+                  - UNKNOWN
+
+      - name: is_pit_out_lap
+        description: >
+          True if the driver exited the pit lane during this lap. On a
+          pit-out lap the lap_duration will typically be null or
+          anomalously long.
+        tests:
+          - not_null
+
+      - name: pit_duration
+        description: >
+          Duration of the pit stop served at the end of the preceding lap,
+          in seconds. Sourced from the pit endpoint's lane_duration field,
+          joined on session_key, driver_number, and lap_number. Null for
+          any lap where the driver did not make a pit stop.
+
+      - name: under_safety_car
+        description: >
+          Derived field. True if a Safety Car period was active during any
+          portion of this lap's time window. Defaults to false when no
+          race_control data is available for the session.
+        tests:
+          - not_null
+
+      - name: under_vsc
+        description: >
+          Derived field. True if a Virtual Safety Car (VSC) period was
+          active during any portion of this lap's time window. A lap can be
+          simultaneously true for both under_safety_car and under_vsc.
+          Defaults to false when no race_control data is available for the
+          session.
+        tests:
+          - not_null
