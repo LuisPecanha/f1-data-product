@@ -12,6 +12,8 @@ dbt_f1/.user.yml
 # DuckDB
 f1.duckdb
 f1.duckdb.wal
+f1_fixtures.duckdb
+f1_fixtures.duckdb.wal
 
 # generated exports (datacontract test targets, rebuilt from gold tables)
 exports/
