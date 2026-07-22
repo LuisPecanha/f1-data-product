@@ -6,3 +6,8 @@ f1:
       path: ../f1.duckdb
       schema: gold
       threads: 1
+    ci:
+      type: duckdb
+      path: ../f1_fixtures.duckdb
+      schema: gold
+      threads: 1
