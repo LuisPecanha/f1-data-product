@@ -1,0 +1,56 @@
+# CI validates the pipeline against hardcoded fixture data (see
+# tests/fixtures/README.md), not the real OpenF1 ingestion pipeline — the
+# live API is fragile in a CI context (rate limits, 422s on unfiltered
+# endpoints, ~235k+ rows, slow). A nightly job (not yet implemented) will
+# handle validation against real, freshly-ingested data.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dbt deps
+        run: |
+          pip install dbt-core==1.12.0 dbt-duckdb==1.10.1
+          dbt deps
+        working-directory: dbt_f1
+        env:
+          DBT_PROFILES_DIR: .
+
+      - name: Install datacontract-cli
+        run: pip install 'datacontract-cli[local]==0.10.39' pyarrow pandas
+
+      - name: Load fixture data
+        run: python tests/fixtures/load_fixtures.py
+
+      - name: Run dbt against fixtures
+        run: |
+          dbt run --target ci
+          dbt test --target ci
+        working-directory: dbt_f1
+        env:
+          DBT_PROFILES_DIR: .
+
+      - name: Export fixture gold to Parquet
+        run: python scripts/export_gold_to_parquet.py --db-path f1_fixtures.duckdb
+
+      - name: Run datacontract test
+        run: |
+          datacontract test contracts/sessions.odcs.yaml
+          datacontract test contracts/lap_times.odcs.yaml
+          datacontract test contracts/driver_season_stats.odcs.yaml
