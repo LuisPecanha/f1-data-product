@@ -33,7 +33,7 @@ jobs:
           DBT_PROFILES_DIR: .
 
       - name: Install datacontract-cli
-        run: pip install 'datacontract-cli[local]'
+        run: pip install 'datacontract-cli[local]==0.10.39' pyarrow pandas
 
       - name: Load fixture data
         run: python tests/fixtures/load_fixtures.py
